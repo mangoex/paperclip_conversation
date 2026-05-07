@@ -1,5 +1,6 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
+import { createHash } from 'node:crypto';
 
 const app = Fastify({ logger: true });
 
@@ -28,6 +29,21 @@ function normalizeDate(value) {
   return Number.isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString();
 }
 
+function contentHash(...parts) {
+  return createHash('sha256')
+    .update(parts.map((part) => String(part || '')).join('|'))
+    .digest('hex');
+}
+
+function boolEnv(primary, fallback) {
+  const value = process.env[primary] ?? process.env[fallback];
+  return value === 'true';
+}
+
+function hasEnv(...names) {
+  return names.some((name) => Boolean(process.env[name]));
+}
+
 function isIgnoredChatwootEvent(body, message, event) {
   const eventName = String(body.event || body.event_type || body.name || '').toLowerCase();
   const messageType = String(message.message_type || body.message_type || '').toLowerCase();
@@ -47,9 +63,9 @@ function isIgnoredChatwootEvent(body, message, event) {
 app.get('/health', async () => ({
   ok: true,
   service: 'humanio-conversation-gateway',
-  mode: process.env.GATEWAY_MODE || 'shadow',
-  outbound_enabled: process.env.ENABLE_WHATSAPP_SEND === 'true',
-  inbound_enabled: process.env.ENABLE_CHATWOOT_REPLY === 'true',
+  mode: process.env.CONVERSATION_MANAGER_MODE || process.env.GATEWAY_MODE || 'shadow',
+  outbound_enabled: boolEnv('HUMANIO_ENABLE_OUTBOUND_SEND', 'ENABLE_WHATSAPP_SEND'),
+  inbound_enabled: boolEnv('HUMANIO_ENABLE_INBOUND_SEND', 'ENABLE_CHATWOOT_REPLY'),
   paperclip_events_enabled: process.env.ENABLE_PAPERCLIP_EVENTS === 'true',
   paperclip_configured: Boolean(
     process.env.PAPERCLIP_API_URL &&
@@ -107,7 +123,8 @@ app.post('/webhooks/chatwoot', async (request, reply) => {
 
   const event = {
     event_type: 'inbound_chatwoot_event',
-    source: 'chatwoot_gateway',
+    source: 'chatwoot',
+    source_detail: 'chatwoot_gateway',
     conversation_id: String(conversation.id || body.conversation_id || ''),
     message_id: messageId,
     inbox_id: inboxId,
@@ -116,7 +133,18 @@ app.post('/webhooks/chatwoot', async (request, reply) => {
     content: message.content || body.content || '',
     attachments: message.attachments || body.attachments || [],
     created_at: normalizeDate(message.created_at || body.created_at),
-    shadow_mode_expected: process.env.GATEWAY_MODE !== 'active',
+    content_hash: contentHash(conversation.id || body.conversation_id, messageId, message.content || body.content),
+    conversation_manager_mode: process.env.CONVERSATION_MANAGER_MODE || process.env.GATEWAY_MODE || 'shadow',
+    humanio_enable_outbound_send: boolEnv('HUMANIO_ENABLE_OUTBOUND_SEND', 'ENABLE_WHATSAPP_SEND'),
+    humanio_enable_inbound_send: boolEnv('HUMANIO_ENABLE_INBOUND_SEND', 'ENABLE_CHATWOOT_REPLY'),
+    shadow_mode_expected: (process.env.CONVERSATION_MANAGER_MODE || process.env.GATEWAY_MODE) !== 'active',
+    credential_flags: {
+      chatwoot_configured: hasEnv('CHATWOOT_API_URL') && hasEnv('CHATWOOT_API_TOKEN'),
+      whatsapp_configured: hasEnv('WHATSAPP_PHONE_NUMBER_ID') && hasEnv('WHATSAPP_CLOUD_API_TOKEN'),
+      supabase_configured: hasEnv('SUPABASE_URL') && hasEnv('SUPABASE_SERVICE_KEY'),
+      paperclip_configured: hasEnv('PAPERCLIP_API_URL') && hasEnv('COMPANY_ID') && hasEnv('CONVERSATION_MANAGER_AGENT_ID') &&
+        hasEnv('PAPERCLIP_API_TOKEN', 'PAPERCLIP_API_KEY', 'PAPERCLIP_AGENT_TOKEN'),
+    },
   };
 
   app.log.info({ event }, 'chatwoot event received');
@@ -130,6 +158,18 @@ app.post('/webhooks/chatwoot', async (request, reply) => {
     const yaml = Object.entries(event)
       .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
       .join('\n');
+    const issueBody = [
+      'ConversationManager inbound event payload.',
+      '',
+      '```yaml',
+      yaml,
+      '```',
+      '',
+      'Operative instruction:',
+      '- Process this as MODO A / inbound_chatwoot_event.',
+      '- Do not send external messages unless runtime flags authorize it.',
+      '- In shadow mode, classify and create internal handoff only.',
+    ].join('\n');
 
     try {
       const res = await fetch(`${paperclipBase}/api/companies/${companyId}/issues`, {
@@ -144,7 +184,16 @@ app.post('/webhooks/chatwoot', async (request, reply) => {
           assigneeAgentId: agentId,
           status: 'todo',
           priority: 'medium',
-          body: yaml,
+          body: issueBody,
+          description: issueBody,
+          content: issueBody,
+          metadata: {
+            event_type: event.event_type,
+            source: event.source,
+            conversation_id: event.conversation_id,
+            message_id: event.message_id,
+            content_hash: event.content_hash,
+          },
         }),
       });
 
