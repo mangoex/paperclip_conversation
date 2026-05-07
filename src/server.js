@@ -9,6 +9,7 @@ await app.register(cors, { origin: true });
 const PORT = Number(process.env.PORT || 3000);
 const processedMessageIds = new Set();
 const fastIntakeHandoffKeys = new Set();
+const fastIntakeReplyKeys = new Set();
 
 function rememberMessage(messageId) {
   if (!messageId) return false;
@@ -17,6 +18,17 @@ function rememberMessage(messageId) {
   if (processedMessageIds.size > 1000) {
     const first = processedMessageIds.values().next().value;
     processedMessageIds.delete(first);
+  }
+  return false;
+}
+
+function rememberBounded(set, key, maxSize = 1000) {
+  if (!key) return false;
+  if (set.has(key)) return true;
+  set.add(key);
+  if (set.size > maxSize) {
+    const first = set.values().next().value;
+    set.delete(first);
   }
   return false;
 }
@@ -83,6 +95,13 @@ function getGatewayConfig() {
       outbound_send: readyForOutboundSend,
     },
   };
+}
+
+function shouldSuppressPaperclipFallbackForFastIntake(config) {
+  return config.fast_intake_enabled &&
+    config.conversation_manager_mode === 'active' &&
+    config.inbound_enabled &&
+    config.configured.chatwoot;
 }
 
 function chatwootBaseUrl() {
@@ -326,6 +345,17 @@ async function runFastIntake(event) {
   const reply = nextIntakeReply(state, event);
 
   if (reply) {
+    const replyKey = contentHash(event.conversation_id, event.content_hash, reply);
+    if (rememberBounded(fastIntakeReplyKeys, replyKey, 1000)) {
+      return {
+        handled: true,
+        complete: false,
+        duplicate_reply_suppressed: true,
+        reply,
+        state,
+      };
+    }
+
     const sent = await sendChatwootMessage(event.conversation_id, reply);
     return {
       handled: true,
@@ -340,11 +370,7 @@ async function runFastIntake(event) {
   if (fastIntakeHandoffKeys.has(handoffKey)) {
     return { handled: false, reason: 'fast_intake_already_handed_off', state };
   }
-  fastIntakeHandoffKeys.add(handoffKey);
-  if (fastIntakeHandoffKeys.size > 500) {
-    const first = fastIntakeHandoffKeys.values().next().value;
-    fastIntakeHandoffKeys.delete(first);
-  }
+  rememberBounded(fastIntakeHandoffKeys, handoffKey, 500);
 
   const confirmation = `Perfecto, ya tengo suficiente informacion para preparar tu demo. Gracias, ${state.nombre_contacto || 'te contacto pronto'}. Ya comparto tu caso con el equipo de Humanio para avanzar con la propuesta.`;
   const sent = await sendChatwootMessage(event.conversation_id, confirmation);
@@ -488,6 +514,18 @@ app.post('/webhooks/chatwoot', async (request, reply) => {
     app.log.info({ reason: fastIntakeResult.reason }, 'gateway fast intake skipped');
   } catch (error) {
     app.log.error({ error }, 'gateway fast intake failed; falling back to Paperclip event');
+  }
+
+  if (shouldSuppressPaperclipFallbackForFastIntake(getGatewayConfig())) {
+    app.log.warn({ conversation_id: event.conversation_id, message_id: event.message_id }, 'paperclip fallback suppressed during gateway fast intake');
+    return reply.code(200).send({
+      ok: true,
+      mode: getGatewayConfig().conversation_manager_mode,
+      gateway_fast_intake: true,
+      paperclip_event_created: false,
+      external_messages_sent: false,
+      suppressed_reason: 'fast_intake_partial_event',
+    });
   }
 
   if (process.env.ENABLE_PAPERCLIP_EVENTS === 'true') {
