@@ -7,6 +7,7 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
 const PORT = Number(process.env.PORT || 3000);
+const BUILD_ID = 'fast-intake-v2-suppress-paperclip-fallback';
 const processedMessageIds = new Set();
 const fastIntakeHandoffKeys = new Set();
 const fastIntakeReplyKeys = new Set();
@@ -427,12 +428,14 @@ function isIgnoredChatwootEvent(body, message, event) {
 app.get('/health', async () => ({
   ok: true,
   service: 'humanio-conversation-gateway',
+  build_id: BUILD_ID,
   ...getGatewayConfig(),
 }));
 
 app.get('/', async () => ({
   ok: true,
   service: 'humanio-conversation-gateway',
+  build_id: BUILD_ID,
   routes: ['/health', '/webhooks/chatwoot'],
 }));
 
