@@ -50,6 +50,13 @@ app.get('/health', async () => ({
   mode: process.env.GATEWAY_MODE || 'shadow',
   outbound_enabled: process.env.ENABLE_WHATSAPP_SEND === 'true',
   inbound_enabled: process.env.ENABLE_CHATWOOT_REPLY === 'true',
+  paperclip_events_enabled: process.env.ENABLE_PAPERCLIP_EVENTS === 'true',
+  paperclip_configured: Boolean(
+    process.env.PAPERCLIP_API_URL &&
+    process.env.COMPANY_ID &&
+    process.env.CONVERSATION_MANAGER_AGENT_ID &&
+    (process.env.PAPERCLIP_API_TOKEN || process.env.PAPERCLIP_API_KEY || process.env.PAPERCLIP_AGENT_TOKEN)
+  ),
 }));
 
 app.get('/', async () => ({
@@ -118,7 +125,7 @@ app.post('/webhooks/chatwoot', async (request, reply) => {
     const paperclipBase = process.env.PAPERCLIP_API_URL;
     const companyId = process.env.COMPANY_ID;
     const agentId = process.env.CONVERSATION_MANAGER_AGENT_ID;
-    const token = process.env.PAPERCLIP_API_TOKEN || process.env.PAPERCLIP_API_KEY;
+    const token = process.env.PAPERCLIP_API_TOKEN || process.env.PAPERCLIP_API_KEY || process.env.PAPERCLIP_AGENT_TOKEN;
 
     const yaml = Object.entries(event)
       .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
