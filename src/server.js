@@ -44,6 +44,44 @@ function hasEnv(...names) {
   return names.some((name) => Boolean(process.env[name]));
 }
 
+function getGatewayConfig() {
+  const conversationManagerMode = process.env.CONVERSATION_MANAGER_MODE || process.env.GATEWAY_MODE || 'shadow';
+  const inboundEnabled = boolEnv('HUMANIO_ENABLE_INBOUND_SEND', 'ENABLE_CHATWOOT_REPLY');
+  const outboundEnabled = boolEnv('HUMANIO_ENABLE_OUTBOUND_SEND', 'ENABLE_WHATSAPP_SEND');
+  const paperclipConfigured = hasEnv('PAPERCLIP_API_URL') &&
+    hasEnv('COMPANY_ID') &&
+    hasEnv('CONVERSATION_MANAGER_AGENT_ID') &&
+    hasEnv('PAPERCLIP_API_TOKEN', 'PAPERCLIP_API_KEY', 'PAPERCLIP_AGENT_TOKEN');
+  const chatwootConfigured = hasEnv('CHATWOOT_API_URL') && hasEnv('CHATWOOT_API_TOKEN');
+  const whatsappConfigured = hasEnv('WHATSAPP_PHONE_NUMBER_ID') && hasEnv('WHATSAPP_CLOUD_API_TOKEN');
+  const supabaseConfigured = hasEnv('SUPABASE_URL') && hasEnv('SUPABASE_SERVICE_KEY');
+  const readyForShadow = process.env.ENABLE_PAPERCLIP_EVENTS === 'true' && paperclipConfigured;
+  const readyForInboundSend = conversationManagerMode === 'active' && inboundEnabled && whatsappConfigured;
+  const readyForOutboundSend = conversationManagerMode === 'active' && outboundEnabled && whatsappConfigured;
+
+  return {
+    conversation_manager_mode: conversationManagerMode,
+    gateway_mode: process.env.GATEWAY_MODE || 'shadow',
+    inbound_enabled: inboundEnabled,
+    outbound_enabled: outboundEnabled,
+    paperclip_events_enabled: process.env.ENABLE_PAPERCLIP_EVENTS === 'true',
+    chatwoot_reply_enabled: process.env.ENABLE_CHATWOOT_REPLY === 'true',
+    whatsapp_send_enabled: process.env.ENABLE_WHATSAPP_SEND === 'true',
+    inbox_filter: process.env.CHATWOOT_WHATSAPP_INBOX_ID || null,
+    configured: {
+      paperclip: paperclipConfigured,
+      chatwoot: chatwootConfigured,
+      whatsapp: whatsappConfigured,
+      supabase: supabaseConfigured,
+    },
+    ready: {
+      shadow_event_ingest: readyForShadow,
+      inbound_send: readyForInboundSend,
+      outbound_send: readyForOutboundSend,
+    },
+  };
+}
+
 function isIgnoredChatwootEvent(body, message, event) {
   const eventName = String(body.event || body.event_type || body.name || '').toLowerCase();
   const messageType = String(message.message_type || body.message_type || '').toLowerCase();
@@ -63,16 +101,7 @@ function isIgnoredChatwootEvent(body, message, event) {
 app.get('/health', async () => ({
   ok: true,
   service: 'humanio-conversation-gateway',
-  mode: process.env.CONVERSATION_MANAGER_MODE || process.env.GATEWAY_MODE || 'shadow',
-  outbound_enabled: boolEnv('HUMANIO_ENABLE_OUTBOUND_SEND', 'ENABLE_WHATSAPP_SEND'),
-  inbound_enabled: boolEnv('HUMANIO_ENABLE_INBOUND_SEND', 'ENABLE_CHATWOOT_REPLY'),
-  paperclip_events_enabled: process.env.ENABLE_PAPERCLIP_EVENTS === 'true',
-  paperclip_configured: Boolean(
-    process.env.PAPERCLIP_API_URL &&
-    process.env.COMPANY_ID &&
-    process.env.CONVERSATION_MANAGER_AGENT_ID &&
-    (process.env.PAPERCLIP_API_TOKEN || process.env.PAPERCLIP_API_KEY || process.env.PAPERCLIP_AGENT_TOKEN)
-  ),
+  ...getGatewayConfig(),
 }));
 
 app.get('/', async () => ({
@@ -134,17 +163,11 @@ app.post('/webhooks/chatwoot', async (request, reply) => {
     attachments: message.attachments || body.attachments || [],
     created_at: normalizeDate(message.created_at || body.created_at),
     content_hash: contentHash(conversation.id || body.conversation_id, messageId, message.content || body.content),
-    conversation_manager_mode: process.env.CONVERSATION_MANAGER_MODE || process.env.GATEWAY_MODE || 'shadow',
-    humanio_enable_outbound_send: boolEnv('HUMANIO_ENABLE_OUTBOUND_SEND', 'ENABLE_WHATSAPP_SEND'),
-    humanio_enable_inbound_send: boolEnv('HUMANIO_ENABLE_INBOUND_SEND', 'ENABLE_CHATWOOT_REPLY'),
-    shadow_mode_expected: (process.env.CONVERSATION_MANAGER_MODE || process.env.GATEWAY_MODE) !== 'active',
-    credential_flags: {
-      chatwoot_configured: hasEnv('CHATWOOT_API_URL') && hasEnv('CHATWOOT_API_TOKEN'),
-      whatsapp_configured: hasEnv('WHATSAPP_PHONE_NUMBER_ID') && hasEnv('WHATSAPP_CLOUD_API_TOKEN'),
-      supabase_configured: hasEnv('SUPABASE_URL') && hasEnv('SUPABASE_SERVICE_KEY'),
-      paperclip_configured: hasEnv('PAPERCLIP_API_URL') && hasEnv('COMPANY_ID') && hasEnv('CONVERSATION_MANAGER_AGENT_ID') &&
-        hasEnv('PAPERCLIP_API_TOKEN', 'PAPERCLIP_API_KEY', 'PAPERCLIP_AGENT_TOKEN'),
-    },
+    conversation_manager_mode: getGatewayConfig().conversation_manager_mode,
+    humanio_enable_outbound_send: getGatewayConfig().outbound_enabled,
+    humanio_enable_inbound_send: getGatewayConfig().inbound_enabled,
+    shadow_mode_expected: getGatewayConfig().conversation_manager_mode !== 'active',
+    credential_flags: getGatewayConfig().configured,
   };
 
   app.log.info({ event }, 'chatwoot event received');
@@ -208,7 +231,7 @@ app.post('/webhooks/chatwoot', async (request, reply) => {
 
   return reply.code(200).send({
     ok: true,
-    mode: process.env.GATEWAY_MODE || 'shadow',
+    mode: getGatewayConfig().conversation_manager_mode,
     external_messages_sent: false,
   });
 });
