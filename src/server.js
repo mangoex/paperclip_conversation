@@ -9,7 +9,7 @@ const PORT = Number(process.env.PORT || 3000);
 
 app.get('/health', async () => ({
   ok: true,
-  service: 'paperclip-conversation',
+  service: 'humanio-conversation-gateway',
   mode: process.env.GATEWAY_MODE || 'shadow',
   outbound_enabled: process.env.ENABLE_WHATSAPP_SEND === 'true',
   inbound_enabled: process.env.ENABLE_CHATWOOT_REPLY === 'true',

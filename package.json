@@ -1,5 +1,5 @@
 {
-  "name": "paperclip-conversation",
+  "name": "humanio-conversation-gateway",
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
