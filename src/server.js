@@ -7,7 +7,7 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
 const PORT = Number(process.env.PORT || 3000);
-const BUILD_ID = 'fast-intake-v2-suppress-paperclip-fallback';
+const BUILD_ID = 'fast-intake-v3-error-fallback';
 const processedMessageIds = new Set();
 const fastIntakeHandoffKeys = new Set();
 const fastIntakeReplyKeys = new Set();
@@ -501,6 +501,7 @@ app.post('/webhooks/chatwoot', async (request, reply) => {
 
   app.log.info({ event }, 'chatwoot event received');
 
+  let fastIntakeError = null;
   try {
     const fastIntakeResult = await runFastIntake(event);
     if (fastIntakeResult.handled) {
@@ -516,10 +517,12 @@ app.post('/webhooks/chatwoot', async (request, reply) => {
     }
     app.log.info({ reason: fastIntakeResult.reason }, 'gateway fast intake skipped');
   } catch (error) {
+    fastIntakeError = error;
+    event.fast_intake_error = error.message || String(error);
     app.log.error({ error }, 'gateway fast intake failed; falling back to Paperclip event');
   }
 
-  if (shouldSuppressPaperclipFallbackForFastIntake(getGatewayConfig())) {
+  if (!fastIntakeError && shouldSuppressPaperclipFallbackForFastIntake(getGatewayConfig())) {
     app.log.warn({ conversation_id: event.conversation_id, message_id: event.message_id }, 'paperclip fallback suppressed during gateway fast intake');
     return reply.code(200).send({
       ok: true,
