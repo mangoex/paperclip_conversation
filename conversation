@@ -1,0 +1,4 @@
+services/conversation-gateway/
+  package.json
+  src/server.js
+  Dockerfile
