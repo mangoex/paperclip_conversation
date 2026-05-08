@@ -7,7 +7,7 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
 const PORT = Number(process.env.PORT || 3000);
-const BUILD_ID = 'fast-intake-v3-error-fallback';
+const BUILD_ID = 'fast-intake-v4-cold-quick-replies';
 const processedMessageIds = new Set();
 const fastIntakeHandoffKeys = new Set();
 const fastIntakeReplyKeys = new Set();
@@ -122,6 +122,22 @@ function paperclipToken() {
 
 function stripTags(value) {
   return String(value || '').replace(/<[^>]*>/g, '').trim();
+}
+
+function normalizeText(value) {
+  return stripTags(value)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[¡!¿?.,;:\s]+/g, ' ')
+    .trim();
+}
+
+function classifyTemplateQuickReply(content) {
+  const text = normalizeText(content);
+  if (['si quiero verla', 'quiero verla'].includes(text)) return 'demo_request';
+  if (text === 'despues') return 'later';
+  return null;
 }
 
 function normalizePhone(value) {
@@ -409,6 +425,76 @@ async function runFastIntake(event) {
   };
 }
 
+async function handleTemplateQuickReply(event) {
+  const quickReply = classifyTemplateQuickReply(event.content);
+  if (!quickReply) return { handled: false, reason: 'not_template_quick_reply' };
+
+  const config = getGatewayConfig();
+  if (config.conversation_manager_mode !== 'active' || !config.inbound_enabled || !config.configured.chatwoot) {
+    return { handled: false, reason: 'quick_reply_not_ready' };
+  }
+
+  if (quickReply === 'later') {
+    const text = 'Sin problema. Cuando estes listo, escribeme por aqui y con gusto te preparo la demo. Saludos.';
+    const sent = await sendChatwootMessage(event.conversation_id, text);
+    return {
+      handled: true,
+      quick_reply: quickReply,
+      external_messages_sent: true,
+      reply: text,
+      chatwoot_message_id: sent.id || sent.message_id || null,
+      paperclip_issue: null,
+    };
+  }
+
+  const ack = 'Perfecto, con gusto. Ya tenemos el contexto del diagnostico que te compartimos, asi que vamos a preparar tu demo personalizada. Apenas este lista, te la mando por aqui.';
+  const sent = await sendChatwootMessage(event.conversation_id, ack);
+  const payload = {
+    event_type: 'cold_template_demo_request',
+    source: 'gateway_quick_reply',
+    run_scope: 'single_request',
+    channel: 'chatwoot_whatsapp',
+    conversation_id: event.conversation_id,
+    message_id: event.message_id,
+    sender_phone: event.sender_phone,
+    sender_name: event.sender_name,
+    message_text: stripTags(event.content),
+    intent: 'demo_request',
+    instruction: 'El prospecto respondio un quick reply del template cold humanio_diagnostico_v1. NO pedir nombre/giro/ciudad. Recuperar contexto del prospecto desde Supabase/outreach_log/Paperclip por sender_phone, conversation_id o ultimo msg1, y disparar demo usando el brief cold existente.',
+  };
+  const body = [
+    'Cold template quick reply received.',
+    '',
+    '```yaml',
+    yamlFromObject(payload),
+    '```',
+  ].join('\n');
+  const assigneeAgentId = process.env.CEO_AGENT_ID || process.env.CONVERSATION_MANAGER_AGENT_ID;
+  const created = await createPaperclipIssue({
+    title: `CEO: demo solicitada desde cold quick reply ${event.sender_phone || event.conversation_id || ''}`.trim(),
+    body,
+    assigneeAgentId,
+    metadata: {
+      event_type: payload.event_type,
+      source: payload.source,
+      conversation_id: event.conversation_id,
+      message_id: event.message_id,
+      sender_phone: event.sender_phone,
+      content_hash: event.content_hash,
+    },
+    runId: `gateway-cold-quick-reply-${event.conversation_id}-${event.message_id || Date.now()}`,
+  });
+
+  return {
+    handled: true,
+    quick_reply: quickReply,
+    external_messages_sent: true,
+    reply: ack,
+    chatwoot_message_id: sent.id || sent.message_id || null,
+    paperclip_issue: created,
+  };
+}
+
 function isIgnoredChatwootEvent(body, message, event) {
   const eventName = String(body.event || body.event_type || body.name || '').toLowerCase();
   const messageType = String(message.message_type || body.message_type || '').toLowerCase();
@@ -500,6 +586,23 @@ app.post('/webhooks/chatwoot', async (request, reply) => {
   };
 
   app.log.info({ event }, 'chatwoot event received');
+
+  try {
+    const quickReplyResult = await handleTemplateQuickReply(event);
+    if (quickReplyResult.handled) {
+      app.log.info({ quickReplyResult }, 'gateway handled template quick reply');
+      return reply.code(200).send({
+        ok: true,
+        mode: getGatewayConfig().conversation_manager_mode,
+        template_quick_reply: quickReplyResult.quick_reply,
+        external_messages_sent: quickReplyResult.external_messages_sent,
+        paperclip_event_created: Boolean(quickReplyResult.paperclip_issue),
+      });
+    }
+  } catch (error) {
+    event.quick_reply_error = error.message || String(error);
+    app.log.error({ error }, 'gateway quick reply handling failed; falling back to Paperclip event');
+  }
 
   let fastIntakeError = null;
   try {
