@@ -7,7 +7,7 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
 const PORT = Number(process.env.PORT || 3000);
-const BUILD_ID = 'fast-intake-v5-hannia-greeting';
+const BUILD_ID = 'fast-intake-v6-info-before-demo';
 const processedMessageIds = new Set();
 const fastIntakeHandoffKeys = new Set();
 const fastIntakeReplyKeys = new Set();
@@ -157,11 +157,80 @@ function hasCommercialIntent(content) {
     'chatbot',
     'bot',
     'automatizacion',
-    'informacion',
-    'info',
     'precio',
     'paquete',
   ].some((term) => text.includes(term));
+}
+
+function hasDemoIntent(content) {
+  const text = normalizeText(content);
+  return [
+    'demo',
+    'propuesta',
+    'quiero verla',
+    'pagina web',
+    'página web',
+    'web con chatbot',
+    'chatbot para mi negocio',
+  ].some((term) => text.includes(term));
+}
+
+function hasInfoIntent(content) {
+  const text = normalizeText(content);
+  return [
+    'como funciona',
+    'cómo funciona',
+    'como trabajan',
+    'que hacen',
+    'qué hacen',
+    'de que se trata',
+    'de qué se trata',
+    'quiero saber',
+    'quiero informacion',
+    'quiero info',
+    'mas informacion',
+    'más informacion',
+  ].some((term) => text.includes(term));
+}
+
+function isAffirmative(content) {
+  const text = normalizeText(content);
+  return [
+    'si',
+    'sí',
+    'claro',
+    'ok',
+    'va',
+    'adelante',
+    'por favor',
+    'si por favor',
+    'me interesa',
+    'quiero',
+    'quiero verla',
+    'hazla',
+  ].some((term) => text === term || text.includes(term));
+}
+
+function asksForDemoConfirmation(content) {
+  const text = normalizeText(content);
+  return text.includes('quieres que te prepare una demo') ||
+    text.includes('quieres que prepare una demo') ||
+    text.includes('quieres que te arme una demo');
+}
+
+function isDemoHandoffAnnouncement(content) {
+  const text = normalizeText(content);
+  return text.includes('ya comparto tu caso') ||
+    text.includes('equipo de humanio para avanzar con la propuesta') ||
+    text.includes('preparar tu demo');
+}
+
+function howItWorksReply({ includeIntro = false, includeQuestion = false } = {}) {
+  const intro = includeIntro ? '¡Hola! Soy Hannia de Humanio. ' : '';
+  const explanation = `${intro}Funciona así: creamos una página web para tu negocio y la conectamos con un chatbot de WhatsApp que responde preguntas frecuentes, presenta tus servicios y ayuda a captar prospectos o citas automáticamente.`;
+  return includeQuestion
+    ? `${explanation} Si quieres, puedo aterrizarlo a tu caso. ¿Cuál es el nombre exacto de tu negocio?`
+    : `${explanation} Si quieres, con los datos que ya me compartiste puedo prepararte una demo personalizada.`;
 }
 
 function classifyTemplateQuickReply(content) {
@@ -269,9 +338,15 @@ function buildIntakeState(messages, event) {
     ultimo_mensaje: stripTags(event.content),
     last_question: null,
     hannia_introduced: false,
+    info_requested: false,
+    demo_requested: false,
+    demo_confirmed: false,
+    demo_confirmation_asked: false,
+    demo_handoff_announced: false,
   };
 
   let lastQuestion = null;
+  let lastOutgoingAskedDemoConfirmation = false;
   for (const message of messages) {
     const content = stripTags(message.content);
     if (!content) continue;
@@ -280,9 +355,23 @@ function buildIntakeState(messages, event) {
       if (normalizeText(content).includes('soy hannia') || normalizeText(content).includes('hannia de humanio')) {
         state.hannia_introduced = true;
       }
+      if (asksForDemoConfirmation(content)) {
+        state.demo_confirmation_asked = true;
+        lastOutgoingAskedDemoConfirmation = true;
+      } else {
+        lastOutgoingAskedDemoConfirmation = false;
+      }
+      if (isDemoHandoffAnnouncement(content)) state.demo_handoff_announced = true;
       lastQuestion = detectQuestionType(content);
       state.last_question = lastQuestion || state.last_question;
       continue;
+    }
+
+    if (hasInfoIntent(content)) state.info_requested = true;
+    if (hasDemoIntent(content) && !hasInfoIntent(content)) state.demo_requested = true;
+    if (lastOutgoingAskedDemoConfirmation && isAffirmative(content)) {
+      state.demo_confirmed = true;
+      state.demo_requested = true;
     }
 
     if (lastQuestion) {
@@ -301,11 +390,23 @@ function buildIntakeState(messages, event) {
 function nextIntakeReply(state, event) {
   const content = stripTags(event.content);
   const wantsDemo = hasCommercialIntent(content);
+  const asksHowItWorks = hasInfoIntent(content);
+
+  if (asksHowItWorks && state.demo_handoff_announced) {
+    return howItWorksReply();
+  }
 
   if (!state.nombre_negocio && isPureGreeting(content)) {
     return state.hannia_introduced
       ? 'Estoy aquí para ayudarte. ¿Buscas información sobre una página web, un chatbot de WhatsApp o automatización con IA?'
       : '¡Hola! Soy Hannia de Humanio. Ayudamos a negocios con páginas web, chatbots de WhatsApp y automatización con IA. ¿Qué te gustaría revisar?';
+  }
+
+  if (!state.nombre_negocio && asksHowItWorks) {
+    return howItWorksReply({
+      includeIntro: !state.hannia_introduced,
+      includeQuestion: true,
+    });
   }
 
   if (!state.nombre_negocio) {
@@ -318,6 +419,10 @@ function nextIntakeReply(state, event) {
   if (!state.giro) return 'Perfecto. ¿Qué servicio o producto principal ofreces?';
   if (!state.ciudad) return 'Gracias. ¿En qué ciudad atiende tu negocio?';
   if (!state.web_o_redes) return 'Gracias. ¿Tienes página web o redes sociales actualmente?';
+  if (asksHowItWorks) return howItWorksReply();
+  if (state.info_requested && !state.demo_requested && !state.demo_confirmed) {
+    return 'Con esto ya puedo orientarte mejor. Para tu caso, Humanio podría ayudarte con una página web y un chatbot que explique tus servicios, atienda dudas y capte prospectos por WhatsApp. ¿Quieres que te prepare una demo personalizada?';
+  }
   return null;
 }
 
@@ -431,7 +536,7 @@ async function runFastIntake(event) {
   }
   rememberBounded(fastIntakeHandoffKeys, handoffKey, 500);
 
-  const confirmation = `Perfecto, ya tengo suficiente informacion para preparar tu demo. Gracias, ${state.nombre_contacto || 'te contacto pronto'}. Ya comparto tu caso con el equipo de Humanio para avanzar con la propuesta.`;
+  const confirmation = `Perfecto, ya tengo suficiente información para preparar tu demo. Gracias, ${state.nombre_contacto || 'te contacto pronto'}. Ya comparto tu caso con el equipo de Humanio para avanzar con la propuesta.`;
   const sent = await sendChatwootMessage(event.conversation_id, confirmation);
   const payload = compactDemoPayload(event, state);
   const yaml = yamlFromObject(payload);
