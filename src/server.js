@@ -7,7 +7,7 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
 const PORT = Number(process.env.PORT || 3000);
-const BUILD_ID = 'fast-intake-v6-info-before-demo';
+const BUILD_ID = 'fast-intake-v7-handoff-before-confirmation';
 const processedMessageIds = new Set();
 const fastIntakeHandoffKeys = new Set();
 const fastIntakeReplyKeys = new Set();
@@ -223,6 +223,10 @@ function isDemoHandoffAnnouncement(content) {
   return text.includes('ya comparto tu caso') ||
     text.includes('equipo de humanio para avanzar con la propuesta') ||
     text.includes('preparar tu demo');
+}
+
+function getIssueId(created) {
+  return created?.id || created?.issue?.id || created?.key || created?.issue?.key || created?.number || null;
 }
 
 function howItWorksReply({ includeIntro = false, includeQuestion = false } = {}) {
@@ -534,10 +538,7 @@ async function runFastIntake(event) {
   if (fastIntakeHandoffKeys.has(handoffKey)) {
     return { handled: false, reason: 'fast_intake_already_handed_off', state };
   }
-  rememberBounded(fastIntakeHandoffKeys, handoffKey, 500);
 
-  const confirmation = `Perfecto, ya tengo suficiente información para preparar tu demo. Gracias, ${state.nombre_contacto || 'te contacto pronto'}. Ya comparto tu caso con el equipo de Humanio para avanzar con la propuesta.`;
-  const sent = await sendChatwootMessage(event.conversation_id, confirmation);
   const payload = compactDemoPayload(event, state);
   const yaml = yamlFromObject(payload);
   const body = [
@@ -561,6 +562,11 @@ async function runFastIntake(event) {
     },
     runId: `gateway-fast-intake-${event.conversation_id}-${event.message_id || Date.now()}`,
   });
+  rememberBounded(fastIntakeHandoffKeys, handoffKey, 500);
+
+  const issueId = getIssueId(created);
+  const confirmation = `Perfecto, ya tengo suficiente información para preparar tu demo. Gracias, ${state.nombre_contacto || 'te contacto pronto'}. Ya comparto tu caso con el equipo de Humanio para avanzar con la propuesta.`;
+  const sent = await sendChatwootMessage(event.conversation_id, confirmation);
 
   return {
     handled: true,
@@ -568,6 +574,7 @@ async function runFastIntake(event) {
     reply: confirmation,
     chatwoot_message_id: sent.id || sent.message_id || null,
     paperclip_issue: created,
+    paperclip_issue_id: issueId,
     state,
   };
 }
