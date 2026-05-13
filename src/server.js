@@ -7,7 +7,7 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
 const PORT = Number(process.env.PORT || 3000);
-const BUILD_ID = 'fast-intake-v4-cold-quick-replies';
+const BUILD_ID = 'fast-intake-v5-hannia-greeting';
 const processedMessageIds = new Set();
 const fastIntakeHandoffKeys = new Set();
 const fastIntakeReplyKeys = new Set();
@@ -133,6 +133,37 @@ function normalizeText(value) {
     .trim();
 }
 
+function isPureGreeting(content) {
+  const text = normalizeText(content);
+  return [
+    'hola',
+    'buen dia',
+    'buenos dias',
+    'buenas',
+    'buenas tardes',
+    'buenas noches',
+    'que tal',
+  ].includes(text);
+}
+
+function hasCommercialIntent(content) {
+  const text = normalizeText(content);
+  return [
+    'demo',
+    'propuesta',
+    'pagina',
+    'web',
+    'sitio',
+    'chatbot',
+    'bot',
+    'automatizacion',
+    'informacion',
+    'info',
+    'precio',
+    'paquete',
+  ].some((term) => text.includes(term));
+}
+
 function classifyTemplateQuickReply(content) {
   const text = normalizeText(content);
   if (['si quiero verla', 'quiero verla'].includes(text)) return 'demo_request';
@@ -237,6 +268,7 @@ function buildIntakeState(messages, event) {
     telefono: event.sender_phone || '',
     ultimo_mensaje: stripTags(event.content),
     last_question: null,
+    hannia_introduced: false,
   };
 
   let lastQuestion = null;
@@ -245,6 +277,9 @@ function buildIntakeState(messages, event) {
     if (!content) continue;
 
     if (isOutgoingMessage(message)) {
+      if (normalizeText(content).includes('soy hannia') || normalizeText(content).includes('hannia de humanio')) {
+        state.hannia_introduced = true;
+      }
       lastQuestion = detectQuestionType(content);
       state.last_question = lastQuestion || state.last_question;
       continue;
@@ -264,18 +299,25 @@ function buildIntakeState(messages, event) {
 }
 
 function nextIntakeReply(state, event) {
-  const content = stripTags(event.content).toLowerCase();
-  const wantsDemo = content.includes('demo') || content.includes('propuesta') || content.includes('pagina') || content.includes('página') || content.includes('chatbot');
+  const content = stripTags(event.content);
+  const wantsDemo = hasCommercialIntent(content);
 
-  if (!state.nombre_negocio) {
-    return wantsDemo
-      ? 'Claro, con gusto. Para prepararte una demo aterrizada, ¿cual es el nombre exacto de tu negocio?'
-      : 'Claro, te ayudo. Para aterrizarlo bien, ¿cual es el nombre de tu negocio?';
+  if (!state.nombre_negocio && isPureGreeting(content)) {
+    return state.hannia_introduced
+      ? 'Estoy aquí para ayudarte. ¿Buscas información sobre una página web, un chatbot de WhatsApp o automatización con IA?'
+      : '¡Hola! Soy Hannia de Humanio. Ayudamos a negocios con páginas web, chatbots de WhatsApp y automatización con IA. ¿Qué te gustaría revisar?';
   }
 
-  if (!state.giro) return 'Perfecto. ¿Que servicio o producto principal ofreces?';
-  if (!state.ciudad) return 'Gracias. ¿En que ciudad atiende tu negocio?';
-  if (!state.web_o_redes) return 'Gracias. ¿Tienes pagina web o redes sociales actualmente?';
+  if (!state.nombre_negocio) {
+    const prefix = state.hannia_introduced ? '' : '¡Hola! Soy Hannia de Humanio. ';
+    return wantsDemo
+      ? `${prefix}Con gusto te ayudo a aterrizar una propuesta. ¿Cuál es el nombre exacto de tu negocio?`
+      : `${prefix}Claro, te ayudo. Para orientarte mejor, ¿cuál es el nombre de tu negocio?`;
+  }
+
+  if (!state.giro) return 'Perfecto. ¿Qué servicio o producto principal ofreces?';
+  if (!state.ciudad) return 'Gracias. ¿En qué ciudad atiende tu negocio?';
+  if (!state.web_o_redes) return 'Gracias. ¿Tienes página web o redes sociales actualmente?';
   return null;
 }
 
