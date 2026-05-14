@@ -7,7 +7,7 @@ const app = Fastify({ logger: true });
 await app.register(cors, { origin: true });
 
 const PORT = Number(process.env.PORT || 3000);
-const BUILD_ID = 'fast-intake-v7-handoff-before-confirmation';
+const BUILD_ID = 'fast-intake-v8-post-demo-sales';
 const processedMessageIds = new Set();
 const fastIntakeHandoffKeys = new Set();
 const fastIntakeReplyKeys = new Set();
@@ -225,6 +225,60 @@ function isDemoHandoffAnnouncement(content) {
     text.includes('preparar tu demo');
 }
 
+function extractDemoUrl(content) {
+  const match = String(content || '').match(/https:\/\/humanio\.surge\.sh\/[^\s<>"')]+/i);
+  return match ? match[0].replace(/[.,;!?]+$/, '') : '';
+}
+
+function isDemoDeliveryMessage(content) {
+  const text = normalizeText(content);
+  return Boolean(extractDemoUrl(content)) &&
+    (text.includes('aqui esta la demo') || text.includes('demo que prepare') || text.includes('demo que preparamos'));
+}
+
+function isPositiveDemoFeedback(content) {
+  const text = normalizeText(content);
+  return [
+    'me gusto',
+    'me encanto',
+    'esta bien',
+    'se ve bien',
+    'muy bien',
+    'excelente',
+    'gracias',
+    'muchas gracias',
+  ].some((term) => text.includes(term));
+}
+
+function isNextStepQuestion(content) {
+  const text = normalizeText(content);
+  return text.includes('que sigue') ||
+    text.includes('siguiente paso') ||
+    text.includes('ahora que') ||
+    text.includes('como continuo') ||
+    text.includes('como seguimos');
+}
+
+function isContractIntent(content) {
+  const text = normalizeText(content);
+  return [
+    'quiero contratar',
+    'contratar',
+    'contrato',
+    'pagar',
+    'pago',
+    'comprar',
+    'empezar',
+    'comenzar',
+    'precio',
+    'precios',
+    'paquete',
+    'paquetes',
+    'cuanto cuesta',
+    'cuánto cuesta',
+  ].some((term) => text.includes(term));
+}
+
 function getIssueId(created) {
   return created?.id || created?.issue?.id || created?.key || created?.issue?.key || created?.number || null;
 }
@@ -347,6 +401,8 @@ function buildIntakeState(messages, event) {
     demo_confirmed: false,
     demo_confirmation_asked: false,
     demo_handoff_announced: false,
+    demo_delivered: false,
+    demo_url: '',
   };
 
   let lastQuestion = null;
@@ -366,6 +422,10 @@ function buildIntakeState(messages, event) {
         lastOutgoingAskedDemoConfirmation = false;
       }
       if (isDemoHandoffAnnouncement(content)) state.demo_handoff_announced = true;
+      if (isDemoDeliveryMessage(content)) {
+        state.demo_delivered = true;
+        state.demo_url = extractDemoUrl(content) || state.demo_url;
+      }
       lastQuestion = detectQuestionType(content);
       state.last_question = lastQuestion || state.last_question;
       continue;
@@ -391,10 +451,36 @@ function buildIntakeState(messages, event) {
   return state;
 }
 
+function postDemoReply(state, event) {
+  if (!state.demo_delivered) return null;
+
+  const content = stripTags(event.content);
+  if (isContractIntent(content)) {
+    return '¡Excelente! Para contratar, entra a https://www.humanio.digital/#paquetes, elige el plan que prefieras y completa el pago en línea. Si quieres página web con chatbot de WhatsApp, normalmente el plan Pro es el mejor punto de partida; si necesitas agenda, automatizaciones o flujos más avanzados, revisa Business.';
+  }
+
+  if (isNextStepQuestion(content)) {
+    return 'El siguiente paso es elegir el plan que mejor encaje con lo que viste en la demo y contratarlo aquí: https://www.humanio.digital/#paquetes. Al completar el pago, el equipo toma la información de tu propuesta y avanza con la implementación.';
+  }
+
+  if (isPositiveDemoFeedback(content)) {
+    return '¡Qué gusto que te haya gustado! Cuando quieras avanzar, puedes revisar los paquetes y contratar directo aquí: https://www.humanio.digital/#paquetes. Si tienes alguna duda puntual sobre qué plan elegir, dime y te oriento.';
+  }
+
+  if (hasInfoIntent(content)) {
+    return howItWorksReply();
+  }
+
+  return 'Con gusto. Si quieres avanzar, los paquetes y la contratación están aquí: https://www.humanio.digital/#paquetes. También puedo orientarte si tienes dudas sobre cuál plan elegir.';
+}
+
 function nextIntakeReply(state, event) {
   const content = stripTags(event.content);
   const wantsDemo = hasCommercialIntent(content);
   const asksHowItWorks = hasInfoIntent(content);
+  const demoReply = postDemoReply(state, event);
+
+  if (demoReply) return demoReply;
 
   if (asksHowItWorks && state.demo_handoff_announced) {
     return howItWorksReply();
